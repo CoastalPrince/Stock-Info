@@ -223,11 +223,13 @@ try:
         signal_text = "⚪ No signal (price within band)"
 
     st.subheader(f"Latest close: {latest_date}")
-    col1, col2, col3, col4 = st.columns(4)
+    col1, col2, col3, col4, col5, col6 = st.columns(6)
     col1.metric("Price", f"{latest['price']:.2f}")
     col2.metric("Regression Price", f"{latest['regression_line']:.2f}")
     col3.metric("Standard Error", f"{latest['standard_error']:.2f}")
-    col4.metric("Signal", signal_text)
+    col4.metric("Upper 2SE", f"{latest['upper_2se']:.2f}")
+    col5.metric("Lower 2SE", f"{latest['lower_2se']:.2f}")
+    col6.metric("Signal", signal_text)
 
     fig = make_chart_figure(signals, portfolio, PLOT_LAST_N_DAYS)
     st.pyplot(fig)
@@ -237,12 +239,27 @@ try:
     colA.metric("Portfolio Value", f"{portfolio_value:,.2f}", f"{pnl_pct:+.2f}%")
     colB.metric("Started at", f"{portfolio_start:,.2f}")
 
-    st.subheader("Recent signals (last 10 trading days)")
-    recent = signals.iloc[-10:][["price", "regression_line", "buy_signal", "sell_signal"]].copy()
+    st.subheader("Recent signals (last 10 trading days, most recent first)")
+    recent = signals.iloc[-10:][[
+        "price", "regression_line", "standard_error", "upper_2se", "lower_2se",
+        "buy_signal", "sell_signal",
+    ]].copy()
     recent["signal"] = recent.apply(
         lambda r: "BUY" if r["buy_signal"] else ("SELL" if r["sell_signal"] else "-"), axis=1
     )
-    st.dataframe(recent[["price", "regression_line", "signal"]], use_container_width=True)
+    recent = recent.sort_index(ascending=False)
+    recent = recent.rename(columns={
+        "price": "Price",
+        "regression_line": "Regression",
+        "standard_error": "Std Error",
+        "upper_2se": "Upper 2SE",
+        "lower_2se": "Lower 2SE",
+        "signal": "Signal",
+    })
+    st.dataframe(
+        recent[["Price", "Regression", "Std Error", "Upper 2SE", "Lower 2SE", "Signal"]],
+        use_container_width=True,
+    )
 
     st.divider()
     if st.button("📨 Send current summary + chart to Telegram"):
