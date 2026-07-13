@@ -24,7 +24,7 @@ can't fire actions with nobody there to click them.
 """
 
 import io
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta  # timedelta also used for yfinance end-date fix below
 
 import numpy as np
 import pandas as pd
@@ -204,7 +204,9 @@ st.caption(
 )
 
 try:
-    end_date = datetime.today().strftime("%Y-%m-%d")
+    # yfinance's `end` is exclusive, so today's own candle gets dropped
+    # if we pass today's date as-is — push it one day forward instead.
+    end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
     prices = fetch_stock_data(TICKER, START_DATE, end_date)
     signals = linear_regression_mean_reversion_strategy(prices, WINDOW, THRESHOLD)
     portfolio = backtest_strategy(signals, INITIAL_CAPITAL)
