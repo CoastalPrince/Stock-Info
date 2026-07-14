@@ -204,9 +204,10 @@ st.caption(
 )
 
 try:
-    # yfinance's `end` is exclusive, so today's own candle gets dropped
-    # if we pass today's date as-is — push it one day forward instead.
-    end_date = (datetime.today() + timedelta(days=1)).strftime("%Y-%m-%d")
+    # Force the date calculation to use IST, regardless of where the server runs
+    ist_today = datetime.utcnow() + timedelta(hours=5, minutes=30)
+    # Advance by 1 day because yfinance end_date is exclusive
+    end_date = (ist_today + timedelta(days=1)).strftime("%Y-%m-%d")
     prices = fetch_stock_data(TICKER, START_DATE, end_date)
     signals = linear_regression_mean_reversion_strategy(prices, WINDOW, THRESHOLD)
     portfolio = backtest_strategy(signals, INITIAL_CAPITAL)
