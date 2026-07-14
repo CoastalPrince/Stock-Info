@@ -17,6 +17,21 @@ work in practice:
      deployed app's URL once a day around 5pm IST. That request wakes
      the app and forces a recompute (see README.md).
 
+KNOWN FAILURE MODE THIS FILE GUARDS AGAINST:
+Community Cloud apps sleep when idle, and Streamlit's on-disk cache_data
+storage can survive that sleep/restart cycle. If fetch_stock_data()'s
+cache key never changes day-to-day (same ticker + start_date), a stale
+disk-cached result from *before* the most recent close can get served
+again on wake — even though it "looks" within TTL — because the TTL
+clock effectively resets relative to container restart time, not to
+when the data was actually fetched. Symptom: the dashboard shows an
+*older* latest-close date than it showed yesterday. Two fixes below:
+  (a) the fetch cache key includes today's IST date, so crossing a
+      calendar day always forces a real re-fetch, independent of TTL.
+  (b) a monotonic guard persists the last-seen latest date to disk and
+      refuses to silently display a regression — it clears the cache
+      and retries once, then warns instead of showing stale data.
+
 Optional: sends a Telegram summary + chart if TELEGRAM_BOT_TOKEN /
 TELEGRAM_CHAT_ID are set as Streamlit secrets (st.secrets), triggered
 by the "Send to Telegram" button — not automatic, since Streamlit
@@ -24,7 +39,8 @@ can't fire actions with nobody there to click them.
 """
 
 import io
-from datetime import datetime, timedelta  # timedelta also used for yfinance end-date fix below
+import json
+from datetime import datetime, timedelta
 
 import numpy as np
 import pandas as pd
@@ -50,6 +66,7 @@ INITIAL_CAPITAL = 10000
 PLOT_LAST_N_DAYS = 90
 AUTOREFRESH_MS = 30 * 60 * 1000   # 30 minutes — only matters if a tab is open
 CACHE_TTL_SECONDS = 30 * 60       # 30 minutes — bounds how often yfinance is hit
+STATE_FILE = "nifty_last_known_date.json"  # persists across reruns within a live container
 
 st.set_page_config(page_title="NIFTY Mean Reversion", layout="wide", page_icon="📈")
 
@@ -57,13 +74,38 @@ st.set_page_config(page_title="NIFTY Mean Reversion", layout="wide", page_icon="
 st_autorefresh(interval=AUTOREFRESH_MS, key="auto_refresh_tick")
 
 
+def get_ist_now():
+    return datetime.utcnow() + timedelta(hours=5, minutes=30)
+
+
+# ---------------------------------------------------------------- staleness guard helpers
+def load_last_known_date():
+    try:
+        with open(STATE_FILE) as f:
+            return json.load(f).get("latest_date")
+    except (FileNotFoundError, json.JSONDecodeError, KeyError):
+        return None
+
+
+def save_last_known_date(date_str):
+    try:
+        with open(STATE_FILE, "w") as f:
+            json.dump({"latest_date": date_str}, f)
+    except OSError:
+        pass  # non-fatal — worst case we lose the monotonic check for this run
+
+
+# ---------------------------------------------------------------- data fetch
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching NIFTY data...")
-def fetch_stock_data(ticker, start_date):
-    # Deliberately no `end` param: yfinance's `end` is exclusive, and
-    # timezone math around "today" was causing off-by-one bugs. Omitting
-    # it entirely fetches everything through the latest available session,
-    # which is the actually-correct approach.
-    data = yf.download(ticker, start=start_date, progress=False)
+def fetch_stock_data(ticker, start_date, cache_bust_date):
+    """
+    cache_bust_date (IST 'YYYY-MM-DD') is part of the cache key on purpose:
+    it guarantees a real re-fetch at least once per calendar day, so a
+    stale disk-cached entry from before today's close can never be served
+    as "today's" data, regardless of TTL/sleep-wake timing.
+    """
+    end_date = (get_ist_now() + timedelta(days=1)).strftime("%Y-%m-%d")
+    data = yf.download(ticker, start=start_date, end=end_date, progress=False)
     if data.empty:
         raise ValueError(f"No data returned for {ticker} — market may be closed or ticker invalid.")
     if isinstance(data.columns, pd.MultiIndex):
@@ -201,10 +243,11 @@ def send_telegram_photo(fig, caption=""):
 # ---------------------------------------------------------------- main app
 st.title("📈 NIFTY Linear-Regression Mean-Reversion Dashboard")
 
-ist_now = datetime.utcnow() + timedelta(hours=5, minutes=30)
+ist_now = get_ist_now()
+today_str = ist_now.strftime("%Y-%m-%d")
 st.caption(
     f"Page loaded at {ist_now.strftime('%Y-%m-%d %H:%M')} IST · "
-    f"data cached for {CACHE_TTL_SECONDS // 60} min · "
+    f"data cached for {CACHE_TTL_SECONDS // 60} min (re-fetched each new IST day regardless) · "
     f"tab auto-refreshes every {AUTOREFRESH_MS // 60000} min while open"
 )
 
@@ -212,19 +255,42 @@ colr, coll = st.columns([5, 1])
 with coll:
     if st.button("🔄 Force refresh"):
         st.cache_data.clear()
+        st.session_state["_regression_retry_done"] = False
         st.rerun()
 
 try:
-    prices = fetch_stock_data(TICKER, START_DATE)
+    prices = fetch_stock_data(TICKER, START_DATE, today_str)
     signals = linear_regression_mean_reversion_strategy(prices, WINDOW, THRESHOLD)
     portfolio = backtest_strategy(signals, INITIAL_CAPITAL)
 
-    latest = signals.iloc[-1]
     latest_date = signals.index[-1].strftime("%Y-%m-%d")
-    ist_today_date = ist_now.strftime("%Y-%m-%d")
+
+    # --- staleness / regression guard --------------------------------
+    last_known = load_last_known_date()
+    if last_known and latest_date < last_known:
+        if not st.session_state.get("_regression_retry_done"):
+            # First time we've seen this go backwards this session:
+            # assume a stale cache entry slipped through and retry once.
+            st.session_state["_regression_retry_done"] = True
+            st.cache_data.clear()
+            st.rerun()
+        else:
+            # Already retried and it's still older — don't silently show
+            # regressed data, surface it instead.
+            st.warning(
+                f"⚠️ Fetched latest close is **{latest_date}**, but this app previously "
+                f"showed **{last_known}**. This usually means Yahoo Finance is serving "
+                "a cached/stale response. Try 'Force refresh' again in a minute."
+            )
+    else:
+        save_last_known_date(latest_date)
+        st.session_state["_regression_retry_done"] = False
+
+    ist_today_date = today_str
     portfolio_value = portfolio["total"].iloc[-1]
     portfolio_start = portfolio["total"].iloc[0]
     pnl_pct = (portfolio_value / portfolio_start - 1) * 100
+    latest = signals.iloc[-1]
 
     if latest["buy_signal"]:
         signal_text = "🟢 BUY (price below regression band)"
