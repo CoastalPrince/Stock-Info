@@ -57,15 +57,20 @@ st.set_page_config(page_title="NIFTY Mean Reversion", layout="wide", page_icon="
 st_autorefresh(interval=AUTOREFRESH_MS, key="auto_refresh_tick")
 
 
-# ---------------------------------------------------------------- data
 @st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching NIFTY data...")
-def fetch_stock_data(ticker, start_date, end_date):
-    data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+def fetch_stock_data(ticker, start_date):
+    # Deliberately no `end` param: yfinance's `end` is exclusive, and
+    # timezone math around "today" was causing off-by-one bugs. Omitting
+    # it entirely fetches everything through the latest available session,
+    # which is the actually-correct approach.
+    data = yf.download(ticker, start=start_date, progress=False)
     if data.empty:
         raise ValueError(f"No data returned for {ticker} — market may be closed or ticker invalid.")
     if isinstance(data.columns, pd.MultiIndex):
-        return data["Close"][ticker]
-    return data["Close"]
+        prices = data["Close"][ticker]
+    else:
+        prices = data["Close"]
+    return prices.dropna()
 
 
 # ---------------------------------------------------------------- strategy
@@ -203,17 +208,20 @@ st.caption(
     f"tab auto-refreshes every {AUTOREFRESH_MS // 60000} min while open"
 )
 
+colr, coll = st.columns([5, 1])
+with coll:
+    if st.button("🔄 Force refresh"):
+        st.cache_data.clear()
+        st.rerun()
+
 try:
-    # Force the date calculation to use IST, regardless of where the server runs
-    ist_today = datetime.utcnow() + timedelta(hours=5, minutes=30)
-    # Advance by 1 day because yfinance end_date is exclusive
-    end_date = (ist_today + timedelta(days=1)).strftime("%Y-%m-%d")
-    prices = fetch_stock_data(TICKER, START_DATE, end_date)
+    prices = fetch_stock_data(TICKER, START_DATE)
     signals = linear_regression_mean_reversion_strategy(prices, WINDOW, THRESHOLD)
     portfolio = backtest_strategy(signals, INITIAL_CAPITAL)
 
     latest = signals.iloc[-1]
     latest_date = signals.index[-1].strftime("%Y-%m-%d")
+    ist_today_date = ist_now.strftime("%Y-%m-%d")
     portfolio_value = portfolio["total"].iloc[-1]
     portfolio_start = portfolio["total"].iloc[0]
     pnl_pct = (portfolio_value / portfolio_start - 1) * 100
@@ -224,6 +232,14 @@ try:
         signal_text = "🔴 SELL (price above regression band)"
     else:
         signal_text = "⚪ No signal (price within band)"
+
+    if latest_date != ist_today_date:
+        st.info(
+            f"Most recent data available is **{latest_date}**. If today ({ist_today_date}) "
+            "is a trading day and it's after ~4pm IST, this usually means Yahoo Finance "
+            "hasn't published today's close yet — not a bug in the app. Try Force refresh "
+            "again in a bit."
+        )
 
     st.subheader(f"Latest close: {latest_date}")
     col1, col2, col3, col4, col5, col6 = st.columns(6)
