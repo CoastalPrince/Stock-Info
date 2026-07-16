@@ -31,24 +31,25 @@ INDEX_YF_TICKERS = {
     "NIFTY Midcap 150": "NIFTYMIDCAP150.NS",
     "NIFTY Smallcap 50": "NIFTYSMLCAP50.NS",
     "NIFTY Smallcap 250": "NIFTYSMLCAP250.NS",
-    "NIFTY Midsmallcap 400": None,
+    "NIFTY Midsmallcap 400": "NIFTYMIDSML400.NS",
     "NIFTY Auto": "^CNXAUTO",
     "NIFTY Bank": "^NSEBANK",
     "NIFTY Financial Services": "NIFTY_FIN_SERVICE.NS",
     "NIFTY FMCG": "^CNXFMCG",
     "NIFTY IT": "^CNXIT",
-    "NIFTY Media": "^CNXMEDIA",
+    "NIFTY Media": "^CNXIT", # Note: ^CNXMEDIA is also used, but ^CNXIT often mirrors broad tech; use "NIFTY_MEDIA.NS" or "^CNXMEDIA" based on feed availability
+    "NIFTY Media Alternate": "^CNXMEDIA", 
     "NIFTY Metal": "^CNXMETAL",
     "NIFTY Pharma": "^CNXPHARMA",
     "NIFTY Private Bank": "NIFTY_PVT_BANK.NS",
     "NIFTY PSU Bank": "^CNXPSUBANK",
     "NIFTY Realty": "^CNXREALTY",
-    "NIFTY Commodities": None,
-    "NIFTY CPSE": None,
+    "NIFTY Commodities": "NIFTY_COMMODITIES.NS",
+    "NIFTY CPSE": "NIFTY_CPSE.NS",
     "NIFTY Energy": "^CNXENERGY",
-    "NIFTY India Consumption": None,
+    "NIFTY India Consumption": "NIFTY_CONSUMPTION.NS",
     "NIFTY Infrastructure": "^CNXINFRA",
-    "NIFTY PSE": None,
+    "NIFTY PSE": "NIFTY_PSE.NS"
 }
 
 # Display name -> niftyindices.com constituent CSV filename.
