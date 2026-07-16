@@ -1,366 +1,260 @@
-"""
-NIFTY Linear-Regression Mean-Reversion Strategy — Streamlit Dashboard
------------------------------------------------------------------------
-Live dashboard version of the original cron script. Recomputes the
-strategy/backtest with a cache TTL (so it doesn't hammer Yahoo Finance),
-and auto-refreshes the browser tab periodically so an open tab picks
-up fresh data through the trading day and after NSE close (~3:30pm IST).
-
-IMPORTANT — read this before you assume it "just refreshes at 5pm":
-Streamlit Community Cloud only runs your code when a browser loads the
-page. There is no server-side cron. Two things make 5pm IST refreshes
-work in practice:
-  1. st_autorefresh() below reruns the page every 30 min IF a tab is
-     open in someone's browser.
-  2. To get a refresh even when nobody has it open, set up a free
-     external ping (e.g. https://cron-job.org, free tier) to GET your
-     deployed app's URL once a day around 5pm IST. That request wakes
-     the app and forces a recompute (see README.md).
-
-KNOWN FAILURE MODE THIS FILE GUARDS AGAINST:
-Community Cloud apps sleep when idle, and Streamlit's on-disk cache_data
-storage can survive that sleep/restart cycle. If fetch_stock_data()'s
-cache key never changes day-to-day (same ticker + start_date), a stale
-disk-cached result from *before* the most recent close can get served
-again on wake — even though it "looks" within TTL — because the TTL
-clock effectively resets relative to container restart time, not to
-when the data was actually fetched. Symptom: the dashboard shows an
-*older* latest-close date than it showed yesterday. Two fixes below:
-  (a) the fetch cache key includes today's IST date, so crossing a
-      calendar day always forces a real re-fetch, independent of TTL.
-  (b) a monotonic guard persists the last-seen latest date to disk and
-      refuses to silently display a regression — it clears the cache
-      and retries once, then warns instead of showing stale data.
-
-Optional: sends a Telegram summary + chart if TELEGRAM_BOT_TOKEN /
-TELEGRAM_CHAT_ID are set as Streamlit secrets (st.secrets), triggered
-by the "Send to Telegram" button — not automatic, since Streamlit
-can't fire actions with nobody there to click them.
-"""
-
-import io
-import json
-from datetime import datetime, timedelta
-
 import numpy as np
 import pandas as pd
-import streamlit as st
-import matplotlib
-
-matplotlib.use("Agg")
-import matplotlib.pyplot as plt
 import yfinance as yf
-import requests
+import matplotlib.pyplot as plt
+from datetime import datetime, timedelta
 from sklearn.linear_model import LinearRegression
-from streamlit_autorefresh import st_autorefresh
 import warnings
+import streamlit as st
 
-warnings.simplefilter(action="ignore", category=pd.errors.PerformanceWarning)
+# Suppress minor pandas fragmentation warnings for clean output
+warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
-# ---------------------------------------------------------------- config
-TICKER = "^NSEI"          # NSE Nifty 50 Index
-START_DATE = "2020-01-01"
-WINDOW = 50
-THRESHOLD = 2
-INITIAL_CAPITAL = 10000
-PLOT_LAST_N_DAYS = 90
-AUTOREFRESH_MS = 30 * 60 * 1000   # 30 minutes — only matters if a tab is open
-CACHE_TTL_SECONDS = 30 * 60       # 30 minutes — bounds how often yfinance is hit
-STATE_FILE = "nifty_last_known_date.json"  # persists across reruns within a live container
+st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
 
-st.set_page_config(page_title="NIFTY Mean Reversion", layout="wide", page_icon="📈")
-
-# Reruns the whole script every AUTOREFRESH_MS while a tab is open.
-st_autorefresh(interval=AUTOREFRESH_MS, key="auto_refresh_tick")
-
-
-def get_ist_now():
-    return datetime.utcnow() + timedelta(hours=5, minutes=30)
-
-
-# ---------------------------------------------------------------- staleness guard helpers
-def load_last_known_date():
-    try:
-        with open(STATE_FILE) as f:
-            return json.load(f).get("latest_date")
-    except (FileNotFoundError, json.JSONDecodeError, KeyError):
-        return None
-
-
-def save_last_known_date(date_str):
-    try:
-        with open(STATE_FILE, "w") as f:
-            json.dump({"latest_date": date_str}, f)
-    except OSError:
-        pass  # non-fatal — worst case we lose the monotonic check for this run
-
-
-# ---------------------------------------------------------------- data fetch
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Fetching NIFTY data...")
-def fetch_stock_data(ticker, start_date, cache_bust_date):
-    """
-    cache_bust_date (IST 'YYYY-MM-DD') is part of the cache key on purpose:
-    it guarantees a real re-fetch at least once per calendar day, so a
-    stale disk-cached entry from before today's close can never be served
-    as "today's" data, regardless of TTL/sleep-wake timing.
-    """
-    end_date = (get_ist_now() + timedelta(days=1)).strftime("%Y-%m-%d")
+# ---------------------------------------------------------------------------
+# 1. Fetch historical stock data
+# ---------------------------------------------------------------------------
+@st.cache_data(ttl=3600, show_spinner=False)
+def fetch_stock_data(ticker, start_date, end_date):
     data = yf.download(ticker, start=start_date, end=end_date, progress=False)
-    if data.empty:
-        raise ValueError(f"No data returned for {ticker} — market may be closed or ticker invalid.")
+
+    # Handle new yfinance (v0.2.40+) MultiIndex columns
     if isinstance(data.columns, pd.MultiIndex):
-        prices = data["Close"][ticker]
+        return data['Close'][ticker]
     else:
-        prices = data["Close"]
-    return prices.dropna()
+        return data['Close']
 
-
-# ---------------------------------------------------------------- strategy
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner="Running regression strategy...")
+# ---------------------------------------------------------------------------
+# 2. Linear regression-based mean reversion strategy
+# ---------------------------------------------------------------------------
 def linear_regression_mean_reversion_strategy(prices, window=50, threshold=2):
     signals = pd.DataFrame(index=prices.index)
-    signals["price"] = prices
-    signals["regression_line"] = np.nan
-    signals["standard_error"] = np.nan
-    signals["deviation"] = np.nan
-    signals["upper_2se"] = np.nan
-    signals["lower_2se"] = np.nan
+    signals['price'] = prices
+
+    # Initialize columns to avoid Pandas fragmentation warnings
+    signals['regression_line'] = np.nan
+    signals['standard_error'] = np.nan
+    signals['deviation'] = np.nan
+    signals['upper_2se'] = np.nan
+    signals['lower_2se'] = np.nan
 
     for i in range(window, len(prices)):
-        y = prices.iloc[i - window:i].values.reshape(-1, 1)
+        # Use .iloc for numerical positional indexing
+        y = prices.iloc[i-window:i].values.reshape(-1, 1)
         X = np.arange(window).reshape(-1, 1)
         model = LinearRegression().fit(X, y)
 
-        regression_line = model.predict(np.array([[window - 1]]))[0][0]
+        # [0][0] extracts the scalar value from the 2D array
+        regression_line = model.predict(np.array([[window-1]]))[0][0]
 
+        # Calculate residuals and standard error
         residuals = y - model.predict(X)
-        residual_sum_of_squares = np.sum(residuals ** 2)
+        residual_sum_of_squares = np.sum(residuals**2)
         standard_error = np.sqrt(residual_sum_of_squares / (window - 2))
 
+        # Using .loc for assignment by date
         current_date = signals.index[i]
-        signals.loc[current_date, "regression_line"] = regression_line
-        signals.loc[current_date, "standard_error"] = standard_error
-        signals.loc[current_date, "deviation"] = signals["price"].iloc[i] - regression_line
-        signals.loc[current_date, "upper_2se"] = regression_line + 2 * standard_error
-        signals.loc[current_date, "lower_2se"] = regression_line - 2 * standard_error
+        signals.loc[current_date, 'regression_line'] = regression_line
+        signals.loc[current_date, 'standard_error'] = standard_error
+        signals.loc[current_date, 'deviation'] = signals['price'].iloc[i] - regression_line
+        signals.loc[current_date, 'upper_2se'] = regression_line + 2 * standard_error
+        signals.loc[current_date, 'lower_2se'] = regression_line - 2 * standard_error
 
-    signals["buy_signal"] = signals["deviation"] < -threshold * signals["standard_error"]
-    signals["sell_signal"] = signals["deviation"] > threshold * signals["standard_error"]
+    # Calculate signals
+    signals['buy_signal'] = signals['deviation'] < -threshold * signals['standard_error']
+    signals['sell_signal'] = signals['deviation'] > threshold * signals['standard_error']
 
-    return signals.dropna()
+    signals = signals.dropna()
 
+    return signals
 
-# ---------------------------------------------------------------- backtest
-@st.cache_data(ttl=CACHE_TTL_SECONDS, show_spinner=False)
+# ---------------------------------------------------------------------------
+# 3. Backtesting the strategy
+# ---------------------------------------------------------------------------
 def backtest_strategy(signals, initial_capital=10000):
     positions = pd.DataFrame(index=signals.index).fillna(0.0)
     portfolio = pd.DataFrame(index=signals.index).fillna(0.0)
 
-    positions["stock"] = 0.0
-    current_position = 0.0
+    positions['stock'] = 0.0
+    current_position = 0.0  # Track holding state day-to-day
 
     for i in range(1, len(signals)):
-        if signals["buy_signal"].iloc[i]:
-            current_position = initial_capital // signals["price"].iloc[i]
-        elif signals["sell_signal"].iloc[i]:
+        # Check signals using .iloc
+        if signals['buy_signal'].iloc[i]:
+            current_position = initial_capital // signals['price'].iloc[i]
+        elif signals['sell_signal'].iloc[i]:
             current_position = 0.0
-        positions.loc[positions.index[i], "stock"] = current_position
 
-    portfolio["positions"] = positions["stock"] * signals["price"]
-    trade_flows = positions["stock"].diff().fillna(0.0) * signals["price"]
-    portfolio["cash"] = initial_capital - trade_flows.cumsum()
-    portfolio["total"] = portfolio["positions"] + portfolio["cash"]
+        # Carry the position forward to the current day
+        positions.loc[positions.index[i], 'stock'] = current_position
+
+    portfolio['positions'] = positions['stock'] * signals['price']
+
+    # Calculate cash flows
+    trade_flows = positions['stock'].diff().fillna(0.0) * signals['price']
+    portfolio['cash'] = initial_capital - trade_flows.cumsum()
+    portfolio['total'] = portfolio['positions'] + portfolio['cash']
 
     return portfolio
 
-
-# ---------------------------------------------------------------- chart
-def make_chart_figure(signals, portfolio, last_n_days=90):
-    view_signals = signals.iloc[-last_n_days:]
-    view_portfolio = portfolio.iloc[-last_n_days:]
+# ---------------------------------------------------------------------------
+# 4. Plotting the results (returns a Figure instead of calling plt.show())
+# ---------------------------------------------------------------------------
+def plot_results(signals, portfolio, lookback_days=90):
+    last_week_signals = signals.iloc[-lookback_days:]
+    last_week_portfolio = portfolio.iloc[-lookback_days:]
 
     fig, (ax1, ax2) = plt.subplots(2, figsize=(12, 8))
 
-    ax1.plot(view_signals.index, view_signals["price"], label="Price")
-    ax1.plot(view_signals.index, view_signals["regression_line"], label="Regression Line", color="orange")
-    ax1.fill_between(
-        view_signals.index,
-        view_signals["lower_2se"],
-        view_signals["upper_2se"],
-        color="lightgrey", label="2 SE Band",
-    )
+    ax1.plot(last_week_signals.index, last_week_signals['price'], label='Price')
+    ax1.plot(last_week_signals.index, last_week_signals['regression_line'], label='Regression Line', color='orange')
 
-    buy_dates = view_signals[view_signals["buy_signal"]].index
-    ax1.scatter(buy_dates, view_signals.loc[buy_dates, "price"],
-                label="Buy Signal", marker="^", color="green", s=100, zorder=5)
+    # Fill between the regression line ± 2 * standard error
+    ax1.fill_between(last_week_signals.index,
+                      last_week_signals['lower_2se'],
+                      last_week_signals['upper_2se'],
+                      color='lightgrey', label='2 SE Band')
 
-    sell_dates = view_signals[view_signals["sell_signal"]].index
-    ax1.scatter(sell_dates, view_signals.loc[sell_dates, "price"],
-                label="Sell Signal", marker="v", color="red", s=100, zorder=5)
+    # Plot signals
+    buy_dates = last_week_signals[last_week_signals['buy_signal']].index
+    buy_prices = last_week_signals.loc[buy_dates, 'price']
+    ax1.scatter(buy_dates, buy_prices, label='Buy Signal', marker='^', color='green', s=100, zorder=5)
+
+    sell_dates = last_week_signals[last_week_signals['sell_signal']].index
+    sell_prices = last_week_signals.loc[sell_dates, 'price']
+    ax1.scatter(sell_dates, sell_prices, label='Sell Signal', marker='v', color='red', s=100, zorder=5)
 
     ax1.legend()
-    ax1.set_title(f"{TICKER} Linear Regression Mean Reversion (Last {last_n_days} Days)")
+    ax1.set_title(f'Linear Regression-Based Mean Reversion Strategy (Last {lookback_days} Days)')
     ax1.grid(True, alpha=0.3)
 
-    ax2.plot(view_portfolio.index, view_portfolio["total"], label="Portfolio Value", color="purple")
-    ax2.set_title(f"Portfolio Value (Last {last_n_days} Days)")
+    ax2.plot(last_week_portfolio.index, last_week_portfolio['total'], label='Portfolio Value', color='purple')
+    ax2.set_title(f'Portfolio Value Over Time (Last {lookback_days} Days)')
     ax2.legend()
     ax2.grid(True, alpha=0.3)
 
     plt.tight_layout()
     return fig
 
+# ---------------------------------------------------------------------------
+# 5. Displaying current data
+# ---------------------------------------------------------------------------
+def display_current_and_regression_prices(signals):
+    current_price = signals['price'].iloc[-1]
+    regression_price = signals['regression_line'].iloc[-1]
+    standard_error = signals['standard_error'].iloc[-1]
+    upper_2se = signals['upper_2se'].iloc[-1]
+    lower_2se = signals['lower_2se'].iloc[-1]
 
-# ---------------------------------------------------------------- telegram (optional, manual trigger)
-def send_telegram_message(text):
-    token = st.secrets.get("TELEGRAM_BOT_TOKEN")
-    chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        raise EnvironmentError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set in Streamlit secrets.")
-    url = f"https://api.telegram.org/bot{token}/sendMessage"
-    resp = requests.post(url, data={"chat_id": chat_id, "text": text[:4000]}, timeout=30)
-    resp.raise_for_status()
+    data = {
+        'Current Price': [current_price],
+        'Regression Price': [regression_price],
+        'Standard Error': [standard_error],
+        'Upper 2SE': [upper_2se],
+        'Lower 2SE': [lower_2se]
+    }
+    df = pd.DataFrame(data)
+    return df
 
+# 5b. Displaying the last N days of signals (most recent first)
+def display_recent_signals(signals, days=60):
+    # Grab the last N days of data
+    recent_df = signals.tail(days).copy()
 
-def send_telegram_photo(fig, caption=""):
-    token = st.secrets.get("TELEGRAM_BOT_TOKEN")
-    chat_id = st.secrets.get("TELEGRAM_CHAT_ID")
-    if not token or not chat_id:
-        raise EnvironmentError("TELEGRAM_BOT_TOKEN / TELEGRAM_CHAT_ID not set in Streamlit secrets.")
-    url = f"https://api.telegram.org/bot{token}/sendPhoto"
-    buf = io.BytesIO()
-    fig.savefig(buf, format="png", dpi=150)
-    buf.seek(0)
-    resp = requests.post(
-        url,
-        data={"chat_id": chat_id, "caption": caption[:1000]},
-        files={"photo": buf},
-        timeout=60,
-    )
-    resp.raise_for_status()
+    # Sort descending so the most recent date is at the top
+    recent_df = recent_df.sort_index(ascending=False)
 
+    # Create a unified 'Signal' column
+    recent_df['Signal'] = '-'
+    recent_df.loc[recent_df['buy_signal'], 'Signal'] = 'BUY'
+    recent_df.loc[recent_df['sell_signal'], 'Signal'] = 'SELL'
 
-# ---------------------------------------------------------------- main app
-st.title("📈 NIFTY Linear-Regression Mean-Reversion Dashboard")
+    # Select and rename columns to match your screenshot
+    display_df = recent_df[['price', 'regression_line', 'standard_error', 'upper_2se', 'lower_2se', 'Signal']]
+    display_df = display_df.rename(columns={
+        'price': 'Price',
+        'regression_line': 'Regression',
+        'standard_error': 'Std Error',
+        'upper_2se': 'Upper 2SE',
+        'lower_2se': 'Lower 2SE'
+    })
 
-ist_now = get_ist_now()
-today_str = ist_now.strftime("%Y-%m-%d")
-st.caption(
-    f"Page loaded at {ist_now.strftime('%Y-%m-%d %H:%M')} IST · "
-    f"data cached for {CACHE_TTL_SECONDS // 60} min (re-fetched each new IST day regardless) · "
-    f"tab auto-refreshes every {AUTOREFRESH_MS // 60000} min while open"
-)
+    # Format the index to display as 'YYYY-MM-DD 00:00:00'
+    display_df.index = display_df.index.strftime('%Y-%m-%d 00:00:00')
+    display_df.index.name = 'Date'
 
-colr, coll = st.columns([5, 1])
-with coll:
-    if st.button("🔄 Force refresh"):
-        st.cache_data.clear()
-        st.session_state["_regression_retry_done"] = False
-        st.rerun()
+    # Optional: Round numbers for cleaner console output
+    display_df = display_df.round(4)
 
-try:
-    prices = fetch_stock_data(TICKER, START_DATE, today_str)
-    signals = linear_regression_mean_reversion_strategy(prices, WINDOW, THRESHOLD)
-    portfolio = backtest_strategy(signals, INITIAL_CAPITAL)
+    return display_df
 
-    latest_date = signals.index[-1].strftime("%Y-%m-%d")
+# ---------------------------------------------------------------------------
+# 6. Streamlit app (replaces the original main() / CLI entry point)
+# ---------------------------------------------------------------------------
+def main():
+    st.title("📈 Linear Regression Mean-Reversion Strategy Dashboard")
+    st.caption("Same logic as the original script — now wrapped in a Streamlit UI.")
 
-    # --- staleness / regression guard --------------------------------
-    last_known = load_last_known_date()
-    if last_known and latest_date < last_known:
-        if not st.session_state.get("_regression_retry_done"):
-            # First time we've seen this go backwards this session:
-            # assume a stale cache entry slipped through and retry once.
-            st.session_state["_regression_retry_done"] = True
-            st.cache_data.clear()
-            st.rerun()
-        else:
-            # Already retried and it's still older — don't silently show
-            # regressed data, surface it instead.
-            st.warning(
-                f"⚠️ Fetched latest close is **{latest_date}**, but this app previously "
-                f"showed **{last_known}**. This usually means Yahoo Finance is serving "
-                "a cached/stale response. Try 'Force refresh' again in a minute."
-            )
-    else:
-        save_last_known_date(latest_date)
-        st.session_state["_regression_retry_done"] = False
+    with st.sidebar:
+        st.header("Settings")
+        ticker = st.text_input("Ticker", value="TATAELXSI.NS")
+        start_date = st.date_input("Start date", value=datetime(2020, 1, 1))
+        window = st.number_input("Regression window (days)", min_value=10, max_value=250, value=50, step=5)
+        threshold = st.number_input("Signal threshold (× SE)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
+        initial_capital = st.number_input("Initial capital", min_value=1000, value=10000, step=1000)
+        lookback_days = st.slider("Chart lookback (days)", min_value=30, max_value=250, value=90, step=10)
+        recent_days = st.slider("Signals table (days)", min_value=10, max_value=120, value=60, step=10)
+        run = st.button("Run analysis", type="primary")
 
-    ist_today_date = today_str
-    portfolio_value = portfolio["total"].iloc[-1]
-    portfolio_start = portfolio["total"].iloc[0]
-    pnl_pct = (portfolio_value / portfolio_start - 1) * 100
-    latest = signals.iloc[-1]
+    if not run and "signals" not in st.session_state:
+        st.info("Set your parameters in the sidebar and click **Run analysis** to get started.")
+        return
 
-    if latest["buy_signal"]:
-        signal_text = "🟢 BUY (price below regression band)"
-    elif latest["sell_signal"]:
-        signal_text = "🔴 SELL (price above regression band)"
-    else:
-        signal_text = "⚪ No signal (price within band)"
+    if run:
+        # Add 1 day because the yfinance 'end' parameter is exclusive
+        end_date = (datetime.today() + timedelta(days=1)).strftime('%Y-%m-%d')
+        start_date_str = start_date.strftime('%Y-%m-%d')
 
-    if latest_date != ist_today_date:
-        st.info(
-            f"Most recent data available is **{latest_date}**. If today ({ist_today_date}) "
-            "is a trading day and it's after ~4pm IST, this usually means Yahoo Finance "
-            "hasn't published today's close yet — not a bug in the app. Try Force refresh "
-            "again in a bit."
-        )
+        with st.spinner(f"Fetching data for {ticker}..."):
+            prices = fetch_stock_data(ticker, start_date_str, end_date)
 
-    st.subheader(f"Latest close: {latest_date}")
-    col1, col2, col3, col4, col5, col6 = st.columns(6)
-    col1.metric("Price", f"{latest['price']:.2f}")
-    col2.metric("Regression Price", f"{latest['regression_line']:.2f}")
-    col3.metric("Standard Error", f"{latest['standard_error']:.2f}")
-    col4.metric("Upper 2SE", f"{latest['upper_2se']:.2f}")
-    col5.metric("Lower 2SE", f"{latest['lower_2se']:.2f}")
-    col6.metric("Signal", signal_text)
+        if prices.empty:
+            st.error("No data returned. Check the ticker symbol and try again.")
+            return
 
-    fig = make_chart_figure(signals, portfolio, PLOT_LAST_N_DAYS)
+        with st.spinner("Calculating regression lines and trading signals..."):
+            signals = linear_regression_mean_reversion_strategy(prices, window=window, threshold=threshold)
+
+        with st.spinner("Running backtest..."):
+            portfolio = backtest_strategy(signals, initial_capital=initial_capital)
+
+        st.session_state["signals"] = signals
+        st.session_state["portfolio"] = portfolio
+        st.session_state["ticker"] = ticker
+
+    signals = st.session_state["signals"]
+    portfolio = st.session_state["portfolio"]
+    ticker = st.session_state["ticker"]
+
+    # --- Current snapshot ---
+    st.subheader(f"Current snapshot — {ticker}")
+    current_df = display_current_and_regression_prices(signals)
+    st.dataframe(current_df, use_container_width=True, hide_index=True)
+
+    # --- Charts ---
+    st.subheader("Charts")
+    fig = plot_results(signals, portfolio, lookback_days=lookback_days)
     st.pyplot(fig)
 
-    st.subheader("Backtest performance")
-    colA, colB = st.columns(2)
-    colA.metric("Portfolio Value", f"{portfolio_value:,.2f}", f"{pnl_pct:+.2f}%")
-    colB.metric("Started at", f"{portfolio_start:,.2f}")
+    # --- Recent signals table ---
+    st.subheader(f"Recent signals (last {recent_days} trading days, most recent first)")
+    recent_table = display_recent_signals(signals, days=recent_days)
+    st.dataframe(recent_table, use_container_width=True)
 
-    st.subheader("Recent signals (last 10 trading days, most recent first)")
-    recent = signals.iloc[-10:][[
-        "price", "regression_line", "standard_error", "upper_2se", "lower_2se",
-        "buy_signal", "sell_signal",
-    ]].copy()
-    recent["signal"] = recent.apply(
-        lambda r: "BUY" if r["buy_signal"] else ("SELL" if r["sell_signal"] else "-"), axis=1
-    )
-    recent = recent.sort_index(ascending=False)
-    recent = recent.rename(columns={
-        "price": "Price",
-        "regression_line": "Regression",
-        "standard_error": "Std Error",
-        "upper_2se": "Upper 2SE",
-        "lower_2se": "Lower 2SE",
-        "signal": "Signal",
-    })
-    st.dataframe(
-        recent[["Price", "Regression", "Std Error", "Upper 2SE", "Lower 2SE", "Signal"]],
-        use_container_width=True,
-    )
+    # --- Portfolio value ---
+    final_value = portfolio['total'].iloc[-1]
+    st.metric("Final portfolio value", f"{final_value:,.2f}", delta=f"{final_value - initial_capital:,.2f}")
 
-    st.divider()
-    if st.button("📨 Send current summary + chart to Telegram"):
-        try:
-            summary_text = (
-                f"NIFTY Mean Reversion — {latest_date}\n"
-                f"Price: {latest['price']:.2f}  Regression: {latest['regression_line']:.2f}\n"
-                f"Signal: {signal_text}\n"
-                f"Portfolio: {portfolio_value:,.2f} ({pnl_pct:+.2f}%)"
-            )
-            send_telegram_message(summary_text)
-            send_telegram_photo(fig, caption=f"{TICKER} chart — {latest_date}")
-            st.success("Sent to Telegram.")
-        except Exception as e:
-            st.error(f"Telegram send failed: {e}")
-
-except Exception as e:
-    st.error(f"Data fetch or computation failed: {e}")
-    st.info("This can happen on market holidays or if Yahoo Finance is briefly rate-limiting. Try again shortly.")
+if __name__ == "__main__":
+    main()
