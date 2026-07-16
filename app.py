@@ -15,11 +15,47 @@ warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
 
 # ---------------------------------------------------------------------------
-# 0. NIFTY 500 constituent list (for the ticker dropdown)
+# 0. Index constituent lists (for the index + ticker dropdowns)
 # ---------------------------------------------------------------------------
 
+# Display name -> niftyindices.com constituent CSV filename.
+# Base URLs are tried in order in _index_csv_urls().
+INDEX_CSV_FILENAMES = {
+    # Broad market
+    "NIFTY 50": "ind_nifty50list.csv",
+    "NIFTY Next 50": "ind_niftynext50list.csv",
+    "NIFTY 100": "ind_nifty100list.csv",
+    "NIFTY 200": "ind_nifty200list.csv",
+    "NIFTY 500": "ind_nifty500list.csv",
+    "NIFTY Midcap 50": "ind_niftymidcap50list.csv",
+    "NIFTY Midcap 150": "ind_niftymidcap150list.csv",
+    "NIFTY Smallcap 50": "ind_niftysmallcap50list.csv",
+    "NIFTY Smallcap 250": "ind_niftysmallcap250list.csv",
+    "NIFTY Midsmallcap 400": "ind_niftymidsmallcap400list.csv",
+    # Sectoral
+    "NIFTY Auto": "ind_niftyautolist.csv",
+    "NIFTY Bank": "ind_niftybanklist.csv",
+    "NIFTY Financial Services": "ind_niftyfinancelist.csv",
+    "NIFTY FMCG": "ind_niftyfmcglist.csv",
+    "NIFTY IT": "ind_niftyitlist.csv",
+    "NIFTY Media": "ind_niftymedialist.csv",
+    "NIFTY Metal": "ind_niftymetallist.csv",
+    "NIFTY Pharma": "ind_niftypharmalist.csv",
+    "NIFTY Private Bank": "ind_nifty_privatebanklist.csv",
+    "NIFTY PSU Bank": "ind_niftypsubanklist.csv",
+    "NIFTY Realty": "ind_niftyrealtylist.csv",
+    # Thematic
+    "NIFTY Commodities": "ind_niftycommoditieslist.csv",
+    "NIFTY CPSE": "ind_niftycpselist.csv",
+    "NIFTY Energy": "ind_niftyenergylist.csv",
+    "NIFTY India Consumption": "ind_niftyconsumptionlist.csv",
+    "NIFTY Infrastructure": "ind_niftyinfralist.csv",
+    "NIFTY PSE": "ind_niftypselist.csv",
+}
+
 # Small, hand-maintained fallback (NIFTY 50) used only if the live fetch below
-# fails (e.g. NSE/niftyindices blocking the request, or no internet access).
+# fails for every index/base-URL combination (e.g. NSE/niftyindices blocking
+# the request, or no internet access) — keeps the app usable regardless.
 _FALLBACK_CONSTITUENTS = [
     ("RELIANCE", "Reliance Industries Ltd."), ("TCS", "Tata Consultancy Services Ltd."),
     ("HDFCBANK", "HDFC Bank Ltd."), ("ICICIBANK", "ICICI Bank Ltd."),
@@ -38,20 +74,24 @@ _FALLBACK_CONSTITUENTS = [
     ("JSWSTEEL", "JSW Steel Ltd."), ("ONGC", "Oil & Natural Gas Corporation Ltd."),
 ]
 
-_NIFTY500_CSV_URLS = [
-    "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv",
-    "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
-]
+
+def _index_csv_urls(filename):
+    return [
+        f"https://niftyindices.com/IndexConstituent/{filename}",
+        f"https://archives.nseindia.com/content/indices/{filename}",
+    ]
 
 
 @st.cache_data(ttl=86400, show_spinner=False)
-def load_nifty500_constituents():
+def load_index_constituents(index_name):
     """
-    Fetch the live NIFTY 500 constituent list (symbol + company name).
-    Falls back to a small hardcoded NIFTY 50 list if the request fails,
-    so the app never breaks even if NSE/niftyindices blocks or changes the URL.
-    Returns a list of (symbol, company_name) tuples, sorted by symbol.
+    Fetch the live constituent list (symbol + company name) for the given index.
+    Falls back to a small hardcoded NIFTY 50 list if every source fails, so the
+    app never breaks even if NSE/niftyindices blocks or renames the CSV.
+    Returns (pairs, is_live) where pairs is a list of (symbol, company_name)
+    tuples sorted by symbol, and is_live indicates whether the live fetch worked.
     """
+    filename = INDEX_CSV_FILENAMES.get(index_name)
     headers = {
         "User-Agent": (
             "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
@@ -59,22 +99,29 @@ def load_nifty500_constituents():
         ),
         "Accept": "text/csv,application/csv,*/*",
     }
-    for url in _NIFTY500_CSV_URLS:
-        try:
-            resp = requests.get(url, headers=headers, timeout=10)
-            resp.raise_for_status()
-            df = pd.read_csv(io.StringIO(resp.text))
-            df.columns = [c.strip() for c in df.columns]
-            symbol_col = next(c for c in df.columns if c.lower() == "symbol")
-            name_col = next((c for c in df.columns if "company" in c.lower() or "name" in c.lower()), symbol_col)
-            pairs = list(zip(df[symbol_col].astype(str).str.strip(), df[name_col].astype(str).str.strip()))
-            if len(pairs) >= 100:  # sanity check that we actually got the full list
-                return sorted(pairs, key=lambda x: x[0])
-        except Exception:
-            continue
+    if filename:
+        for url in _index_csv_urls(filename):
+            try:
+                resp = requests.get(url, headers=headers, timeout=10)
+                resp.raise_for_status()
+                df = pd.read_csv(io.StringIO(resp.text))
+                df.columns = [c.strip() for c in df.columns]
+                symbol_col = next(c for c in df.columns if c.lower() == "symbol")
+                name_col = next(
+                    (c for c in df.columns if "company" in c.lower() or "name" in c.lower()),
+                    symbol_col,
+                )
+                pairs = list(zip(
+                    df[symbol_col].astype(str).str.strip(),
+                    df[name_col].astype(str).str.strip(),
+                ))
+                if len(pairs) >= 5:  # sanity check we actually got real data
+                    return sorted(pairs, key=lambda x: x[0]), True
+            except Exception:
+                continue
 
     # Live fetch failed everywhere — use the fallback list
-    return sorted(_FALLBACK_CONSTITUENTS, key=lambda x: x[0])
+    return sorted(_FALLBACK_CONSTITUENTS, key=lambda x: x[0]), False
 
 
 # ---------------------------------------------------------------------------
@@ -261,15 +308,19 @@ def main():
     st.title("📈 Linear Regression Mean-Reversion Strategy Dashboard")
     st.caption("Same logic as the original script — now wrapped in a Streamlit UI.")
 
-    constituents = load_nifty500_constituents()
-    is_live_list = len(constituents) > 100
-    options = [f"{sym} — {name}" for sym, name in constituents]
-
     with st.sidebar:
         st.header("Settings")
 
+        index_name = st.selectbox(
+            "Index",
+            list(INDEX_CSV_FILENAMES.keys()),
+            index=0,
+        )
+        constituents, is_live_list = load_index_constituents(index_name)
+        options = [f"{sym} — {name}" for sym, name in constituents]
+
         if not is_live_list:
-            st.caption("⚠️ Couldn't reach the live NIFTY 500 list — showing a NIFTY 50 fallback.")
+            st.caption(f"⚠️ Couldn't reach the live {index_name} list — showing a NIFTY 50 fallback.")
 
         default_idx = next(
             (i for i, (sym, _) in enumerate(constituents) if sym == "TATAELXSI"), 0
@@ -280,7 +331,7 @@ def main():
             ticker = st.text_input("Ticker (yfinance format, e.g. RELIANCE.NS)", value="TATAELXSI.NS")
         else:
             selected = st.selectbox(
-                f"Ticker ({'NIFTY 500' if is_live_list else 'NIFTY 50 fallback'})",
+                f"Ticker ({index_name}{'' if is_live_list else ' — fallback'})",
                 options,
                 index=default_idx,
             )
