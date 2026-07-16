@@ -18,6 +18,39 @@ st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide"
 # 0. Index constituent lists (for the index + ticker dropdowns)
 # ---------------------------------------------------------------------------
 
+# Display name -> yfinance ticker for the *index itself* (index price series,
+# not a constituent stock). None = no reliable Yahoo Finance ticker found;
+# that index is still usable in "pick a stock under this index" mode.
+INDEX_YF_TICKERS = {
+    "NIFTY 50": "^NSEI",
+    "NIFTY Next 50": "^NSMIDCP",
+    "NIFTY 100": "^CNX100",
+    "NIFTY 200": "^CNX200",
+    "NIFTY 500": "^CRSLDX",
+    "NIFTY Midcap 50": "^NSEMDCP50",
+    "NIFTY Midcap 150": "NIFTYMIDCAP150.NS",
+    "NIFTY Smallcap 50": "NIFTYSMLCAP50.NS",
+    "NIFTY Smallcap 250": "NIFTYSMLCAP250.NS",
+    "NIFTY Midsmallcap 400": None,
+    "NIFTY Auto": "^CNXAUTO",
+    "NIFTY Bank": "^NSEBANK",
+    "NIFTY Financial Services": "NIFTY_FIN_SERVICE.NS",
+    "NIFTY FMCG": "^CNXFMCG",
+    "NIFTY IT": "^CNXIT",
+    "NIFTY Media": "^CNXMEDIA",
+    "NIFTY Metal": "^CNXMETAL",
+    "NIFTY Pharma": "^CNXPHARMA",
+    "NIFTY Private Bank": "NIFTY_PVT_BANK.NS",
+    "NIFTY PSU Bank": "^CNXPSUBANK",
+    "NIFTY Realty": "^CNXREALTY",
+    "NIFTY Commodities": None,
+    "NIFTY CPSE": None,
+    "NIFTY Energy": "^CNXENERGY",
+    "NIFTY India Consumption": None,
+    "NIFTY Infrastructure": "^CNXINFRA",
+    "NIFTY PSE": None,
+}
+
 # Display name -> niftyindices.com constituent CSV filename.
 # Base URLs are tried in order in _index_csv_urls().
 INDEX_CSV_FILENAMES = {
@@ -316,27 +349,39 @@ def main():
             list(INDEX_CSV_FILENAMES.keys()),
             index=0,
         )
-        constituents, is_live_list = load_index_constituents(index_name)
-        options = [f"{sym} — {name}" for sym, name in constituents]
 
-        if not is_live_list:
-            st.caption(f"⚠️ Couldn't reach the live {index_name} list — showing a NIFTY 50 fallback.")
+        index_ticker = INDEX_YF_TICKERS.get(index_name)
+        mode_options = ["A stock within this index"]
+        if index_ticker:
+            mode_options.insert(0, "The index itself")
+        analysis_mode = st.radio("Analyze", mode_options)
 
-        default_idx = next(
-            (i for i, (sym, _) in enumerate(constituents) if sym == "TATAELXSI"), 0
-        )
-        use_custom = st.checkbox("Enter a custom ticker instead", value=False)
-
-        if use_custom:
-            ticker = st.text_input("Ticker (yfinance format, e.g. RELIANCE.NS)", value="TATAELXSI.NS")
+        use_custom = False
+        if analysis_mode == "The index itself":
+            ticker = index_ticker
+            st.caption(f"Using **{ticker}** — the {index_name} index value itself (not a constituent stock).")
         else:
-            selected = st.selectbox(
-                f"Ticker ({index_name}{'' if is_live_list else ' — fallback'})",
-                options,
-                index=default_idx,
+            constituents, is_live_list = load_index_constituents(index_name)
+            options = [f"{sym} — {name}" for sym, name in constituents]
+
+            if not is_live_list:
+                st.caption(f"⚠️ Couldn't reach the live {index_name} list — showing a NIFTY 50 fallback.")
+
+            default_idx = next(
+                (i for i, (sym, _) in enumerate(constituents) if sym == "TATAELXSI"), 0
             )
-            symbol = selected.split(" — ")[0]
-            ticker = f"{symbol}.NS"
+            use_custom = st.checkbox("Enter a custom ticker instead", value=False)
+
+            if use_custom:
+                ticker = st.text_input("Ticker (yfinance format, e.g. RELIANCE.NS)", value="TATAELXSI.NS")
+            else:
+                selected = st.selectbox(
+                    f"Ticker ({index_name}{'' if is_live_list else ' — fallback'})",
+                    options,
+                    index=default_idx,
+                )
+                symbol = selected.split(" — ")[0]
+                ticker = f"{symbol}.NS"
 
         start_date = st.date_input("Start date", value=datetime(2020, 1, 1))
         window = st.number_input("Regression window (days)", min_value=10, max_value=250, value=50, step=5)
