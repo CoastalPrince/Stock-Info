@@ -1,5 +1,7 @@
+import io
 import numpy as np
 import pandas as pd
+import requests
 import yfinance as yf
 import matplotlib.pyplot as plt
 from datetime import datetime, timedelta
@@ -11,6 +13,69 @@ import streamlit as st
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
 st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
+
+# ---------------------------------------------------------------------------
+# 0. NIFTY 500 constituent list (for the ticker dropdown)
+# ---------------------------------------------------------------------------
+
+# Small, hand-maintained fallback (NIFTY 50) used only if the live fetch below
+# fails (e.g. NSE/niftyindices blocking the request, or no internet access).
+_FALLBACK_CONSTITUENTS = [
+    ("RELIANCE", "Reliance Industries Ltd."), ("TCS", "Tata Consultancy Services Ltd."),
+    ("HDFCBANK", "HDFC Bank Ltd."), ("ICICIBANK", "ICICI Bank Ltd."),
+    ("INFY", "Infosys Ltd."), ("BHARTIARTL", "Bharti Airtel Ltd."),
+    ("ITC", "ITC Ltd."), ("LT", "Larsen & Toubro Ltd."),
+    ("KOTAKBANK", "Kotak Mahindra Bank Ltd."), ("AXISBANK", "Axis Bank Ltd."),
+    ("SBIN", "State Bank of India"), ("HINDUNILVR", "Hindustan Unilever Ltd."),
+    ("BAJFINANCE", "Bajaj Finance Ltd."), ("ASIANPAINT", "Asian Paints Ltd."),
+    ("MARUTI", "Maruti Suzuki India Ltd."), ("TITAN", "Titan Company Ltd."),
+    ("SUNPHARMA", "Sun Pharmaceutical Industries Ltd."), ("TATAMOTORS", "Tata Motors Ltd."),
+    ("TATASTEEL", "Tata Steel Ltd."), ("WIPRO", "Wipro Ltd."),
+    ("ULTRACEMCO", "UltraTech Cement Ltd."), ("NESTLEIND", "Nestle India Ltd."),
+    ("NTPC", "NTPC Ltd."), ("POWERGRID", "Power Grid Corporation of India Ltd."),
+    ("HCLTECH", "HCL Technologies Ltd."), ("ADANIENT", "Adani Enterprises Ltd."),
+    ("TATAELXSI", "Tata Elxsi Ltd."), ("M&M", "Mahindra & Mahindra Ltd."),
+    ("JSWSTEEL", "JSW Steel Ltd."), ("ONGC", "Oil & Natural Gas Corporation Ltd."),
+]
+
+_NIFTY500_CSV_URLS = [
+    "https://niftyindices.com/IndexConstituent/ind_nifty500list.csv",
+    "https://archives.nseindia.com/content/indices/ind_nifty500list.csv",
+]
+
+
+@st.cache_data(ttl=86400, show_spinner=False)
+def load_nifty500_constituents():
+    """
+    Fetch the live NIFTY 500 constituent list (symbol + company name).
+    Falls back to a small hardcoded NIFTY 50 list if the request fails,
+    so the app never breaks even if NSE/niftyindices blocks or changes the URL.
+    Returns a list of (symbol, company_name) tuples, sorted by symbol.
+    """
+    headers = {
+        "User-Agent": (
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ),
+        "Accept": "text/csv,application/csv,*/*",
+    }
+    for url in _NIFTY500_CSV_URLS:
+        try:
+            resp = requests.get(url, headers=headers, timeout=10)
+            resp.raise_for_status()
+            df = pd.read_csv(io.StringIO(resp.text))
+            df.columns = [c.strip() for c in df.columns]
+            symbol_col = next(c for c in df.columns if c.lower() == "symbol")
+            name_col = next((c for c in df.columns if "company" in c.lower() or "name" in c.lower()), symbol_col)
+            pairs = list(zip(df[symbol_col].astype(str).str.strip(), df[name_col].astype(str).str.strip()))
+            if len(pairs) >= 100:  # sanity check that we actually got the full list
+                return sorted(pairs, key=lambda x: x[0])
+        except Exception:
+            continue
+
+    # Live fetch failed everywhere — use the fallback list
+    return sorted(_FALLBACK_CONSTITUENTS, key=lambda x: x[0])
+
 
 # ---------------------------------------------------------------------------
 # 1. Fetch historical stock data
@@ -196,9 +261,32 @@ def main():
     st.title("📈 Linear Regression Mean-Reversion Strategy Dashboard")
     st.caption("Same logic as the original script — now wrapped in a Streamlit UI.")
 
+    constituents = load_nifty500_constituents()
+    is_live_list = len(constituents) > 100
+    options = [f"{sym} — {name}" for sym, name in constituents]
+
     with st.sidebar:
         st.header("Settings")
-        ticker = st.text_input("Ticker", value="TATAELXSI.NS")
+
+        if not is_live_list:
+            st.caption("⚠️ Couldn't reach the live NIFTY 500 list — showing a NIFTY 50 fallback.")
+
+        default_idx = next(
+            (i for i, (sym, _) in enumerate(constituents) if sym == "TATAELXSI"), 0
+        )
+        use_custom = st.checkbox("Enter a custom ticker instead", value=False)
+
+        if use_custom:
+            ticker = st.text_input("Ticker (yfinance format, e.g. RELIANCE.NS)", value="TATAELXSI.NS")
+        else:
+            selected = st.selectbox(
+                f"Ticker ({'NIFTY 500' if is_live_list else 'NIFTY 50 fallback'})",
+                options,
+                index=default_idx,
+            )
+            symbol = selected.split(" — ")[0]
+            ticker = f"{symbol}.NS"
+
         start_date = st.date_input("Start date", value=datetime(2020, 1, 1))
         window = st.number_input("Regression window (days)", min_value=10, max_value=250, value=50, step=5)
         threshold = st.number_input("Signal threshold (× SE)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
