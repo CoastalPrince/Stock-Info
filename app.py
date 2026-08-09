@@ -14,6 +14,34 @@ warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
 st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
 
+st.markdown(
+    """
+    <style>
+    /* Keep the header bar itself visible (needed for sidebar toggle) */
+    header[data-testid="stHeader"] {
+        background: transparent;
+    }
+
+    /* Hide the toolbar actions on the right: Fork, GitHub icon, "⋮" menu */
+    [data-testid="stToolbarActions"] {
+        display: none !important;
+    }
+    [data-testid="stDeployButton"] {
+        display: none !important;
+    }
+    #MainMenu {
+        visibility: hidden;
+    }
+
+    /* Fallback: hide any GitHub link that might not be caught by testid */
+    header[data-testid="stHeader"] a[href*="github.com"] {
+        display: none !important;
+    }
+    </style>
+    """,
+    unsafe_allow_html=True,
+)
+
 # ---------------------------------------------------------------------------
 # 0. Index constituent lists (for the index + ticker dropdowns)
 # ---------------------------------------------------------------------------
