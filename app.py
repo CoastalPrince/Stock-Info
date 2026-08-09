@@ -13,7 +13,7 @@ import streamlit as st
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
 st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
-
+st.set_option("client.toolbarMode", "minimal")
 # ---------------------------------------------------------------------------
 # 0. Index constituent lists (for the index + ticker dropdowns)
 # ---------------------------------------------------------------------------
