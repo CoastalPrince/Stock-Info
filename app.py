@@ -14,18 +14,6 @@ warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
 st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
 
-st.markdown(
-    """
-    <style>
-    header[data-testid="stHeader"] {
-        visibility: hidden;
-        height: 0;
-    }
-    #MainMenu {visibility: hidden;}
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
 # ---------------------------------------------------------------------------
 # 0. Index constituent lists (for the index + ticker dropdowns)
 # ---------------------------------------------------------------------------
