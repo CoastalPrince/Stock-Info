@@ -13,30 +13,6 @@ import streamlit as st
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
 st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
-st.set_option("client.toolbarMode", "minimal")
-st.markdown("""
-<style>
-    [data-testid="stToolbar"] {
-        visibility: hidden;
-        height: 0%;
-        position: fixed;
-    }
-
-    [data-testid="stDecoration"] {
-        visibility: hidden;
-        height: 0%;
-        position: fixed;
-    }
-
-    #MainMenu {
-        visibility: hidden;
-    }
-
-    footer {
-        visibility: hidden;
-    }
-</style>
-""", unsafe_allow_html=True)
 # ---------------------------------------------------------------------------
 # 0. Index constituent lists (for the index + ticker dropdowns)
 # ---------------------------------------------------------------------------
