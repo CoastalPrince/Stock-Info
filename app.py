@@ -323,10 +323,10 @@ def display_current_and_regression_prices(signals):
 
     data = {
         'Current Price': [current_price],
-        'Regression Price': [regression_price],
-        'Standard Error': [standard_error],
-        'Upper 2SE': [upper_2se],
-        'Lower 2SE': [lower_2se]
+        'Mean': [regression_price],
+        'Bound': [standard_error],
+        'Upper Limit': [upper_2se],
+        'Lower Limit': [lower_2se]
     }
     df = pd.DataFrame(data)
     return df
