@@ -12,7 +12,7 @@ import streamlit as st
 # Suppress minor pandas fragmentation warnings for clean output
 warnings.simplefilter(action='ignore', category=pd.errors.PerformanceWarning)
 
-st.set_page_config(page_title="Mean Reversion Strategy Dashboard", layout="wide")
+st.set_page_config(page_title="Strategy Dashboard", layout="wide")
 
 st.markdown(
     """
@@ -282,7 +282,7 @@ def plot_results(signals, portfolio, lookback_days=90):
     fig, (ax1, ax2) = plt.subplots(2, figsize=(12, 8))
 
     ax1.plot(last_week_signals.index, last_week_signals['price'], label='Price')
-    ax1.plot(last_week_signals.index, last_week_signals['regression_line'], label='Regression Line', color='orange')
+    ax1.plot(last_week_signals.index, last_week_signals['regression_line'], label='Mean', color='orange')
 
     # Fill between the regression line ± 2 * standard error
     ax1.fill_between(last_week_signals.index,
@@ -300,7 +300,7 @@ def plot_results(signals, portfolio, lookback_days=90):
     ax1.scatter(sell_dates, sell_prices, label='Sell Signal', marker='v', color='red', s=100, zorder=5)
 
     ax1.legend()
-    ax1.set_title(f'Linear Regression-Based Mean Reversion Strategy (Last {lookback_days} Days)')
+    ax1.set_title(f'Strategy (Last {lookback_days} Days)')
     ax1.grid(True, alpha=0.3)
 
     ax2.plot(last_week_portfolio.index, last_week_portfolio['total'], label='Portfolio Value', color='purple')
@@ -348,10 +348,10 @@ def display_recent_signals(signals, days=60):
     display_df = recent_df[['price', 'regression_line', 'standard_error', 'upper_2se', 'lower_2se', 'Signal']]
     display_df = display_df.rename(columns={
         'price': 'Price',
-        'regression_line': 'Regression',
-        'standard_error': 'Std Error',
-        'upper_2se': 'Upper 2SE',
-        'lower_2se': 'Lower 2SE'
+        'regression_line': 'Mean',
+        'standard_error': 'Bound',
+        'upper_2se': 'Upper Limit',
+        'lower_2se': 'Lower Limit'
     })
 
     # Format the index to display as 'YYYY-MM-DD 00:00:00'
@@ -367,7 +367,7 @@ def display_recent_signals(signals, days=60):
 # 6. Streamlit app (replaces the original main() / CLI entry point)
 # ---------------------------------------------------------------------------
 def main():
-    st.title("📈 Linear Regression Mean-Reversion Strategy Dashboard")
+    st.title("📈 Strategy Dashboard")
     st.caption("Same logic as the original script — now wrapped in a Streamlit UI.")
 
     with st.sidebar:
@@ -413,7 +413,7 @@ def main():
                 ticker = f"{symbol}.NS"
 
         start_date = st.date_input("Start date", value=datetime(2020, 1, 1))
-        window = st.number_input("Regression window (days)", min_value=10, max_value=250, value=50, step=5)
+        window = st.number_input("Window (days)", min_value=10, max_value=250, value=50, step=5)
         threshold = st.number_input("Signal threshold (× SE)", min_value=0.5, max_value=5.0, value=2.0, step=0.5)
         initial_capital = st.number_input("Initial capital", min_value=1000, value=10000, step=1000)
         lookback_days = st.slider("Chart lookback (days)", min_value=30, max_value=250, value=90, step=10)
