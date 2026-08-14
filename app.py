@@ -191,13 +191,32 @@ def load_index_constituents(index_name):
 # ---------------------------------------------------------------------------
 @st.cache_data(ttl=3600, show_spinner=False)
 def fetch_stock_data(ticker, start_date, end_date):
-    data = yf.download(ticker, start=start_date, end=end_date, progress=False)
+    close = pd.Series(dtype=float)
 
-    # Handle new yfinance (v0.2.40+) MultiIndex columns
-    if isinstance(data.columns, pd.MultiIndex):
-        return data['Close'][ticker]
-    else:
-        return data['Close']
+    try:
+        data = yf.download(ticker, start=start_date, end=end_date, progress=False, auto_adjust=True)
+        if not data.empty:
+            if isinstance(data.columns, pd.MultiIndex):
+                if ticker in data['Close'].columns:
+                    close = data['Close'][ticker]
+                else:
+                    close = data['Close'].iloc[:, 0]
+            else:
+                close = data['Close']
+    except Exception:
+        pass
+
+    # yf.download() is unreliable for index tickers (^NSEI, ^CNXIT, etc.)
+    # — fall back to Ticker().history(), which works more consistently for them.
+    if close.dropna().empty:
+        try:
+            hist = yf.Ticker(ticker).history(start=start_date, end=end_date)
+            if not hist.empty:
+                close = hist['Close']
+        except Exception:
+            pass
+
+    return close.dropna()
 
 # ---------------------------------------------------------------------------
 # 2. Linear regression-based mean reversion strategy
